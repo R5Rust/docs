@@ -3,9 +3,10 @@
 How player movement works in Apex Legends S21 and how R5Rust reproduces it. Ziplines, zip towers, grapple, jump pads
 and legend abilities are not covered yet.
 
-> **Status (2026-11-17):** the movement is being re-ported function by function from the S21 client
-> (`r5apex_dx12.exe`). The lurch is already S21; the rest was first ported from a 2019 server build and is being
-> checked against the S21 code and real R5Flowstate recordings. Numbers below get updated as each part lands.
+> **Status (2026-11-17):** ported function by function from the S21 client (`r5apex_dx12.exe`): every movement
+> function is mapped to its S21 address, decompiled and diffed against the port ([implementation.md](implementation.md)
+> has the address map). Against 87 recorded R5Flowstate runs, 31-33 now match within 2 u/s and 10 u (23 before the
+> port). Most of what is left comes from static-prop collision, not the movement code (see below).
 
 ## The numbers
 
@@ -34,7 +35,10 @@ Values for a stock legend. Apex scales move speed by what you hold: **1.0 with a
 - A sprint press asks to sprint for 3 s (holding it keeps extending that). Once you're sprinting it **latches**: it
   stays on while you keep moving forward (within ~45°) and aren't crouched. Stopping, going backwards or crouching
   ends it.
-- **Auto Sprint** (an Apex setting, on by default in R5Rust) sprints whenever you push forward, no key needed.
+- **Auto Sprint** (an Apex setting, on by default in R5Rust) presses sprint for you when the previous input pushed
+  forward hard enough (forward axis at least 0.94, 0.8 once sprinting), within 45° of the view and not crouched.
+- **Key presses count half on their first frame:** a key that goes down during a frame counts 0.5 for that frame
+  (0.25 if it is also released within it), so the first frame of a press asks for 0.75 of the speed.
 - Sprint only engages on the ground (or within 0.25 s of it) and while moving mostly forward.
 
 ### Acceleration and friction
@@ -79,7 +83,7 @@ Values for a stock legend. Apex scales move speed by what you hold: **1.0 with a
   gives a jump plus your input speed. Jumping below the corner without W hops you back off the wall.
 - **Superglide** (mantle boost off): jump off at the end of a mantle, then crouch on the very next tick, for about
   400 u/s.
-- **Mantle boost** (on by default, the universal S21 mechanic): jump in the **sweet spot** at the very end of a mantle
+- **Mantle boost** (from R5Flowstate's SDK, not the stock S21 client; a toggle in R5Rust's menu): jump in the **sweet spot** at the very end of a mantle
   (about the last 0.115 s) to launch at sprint × 1.3 (338 u/s) with a 90 u jump and a free slide. Tap-strafes are
   blocked until you land. Jumping outside the sweet spot gives a normal 260 u/s, 56 u jump.
 
@@ -95,21 +99,40 @@ Values for a stock legend. Apex scales move speed by what you hold: **1.0 with a
 
 ## How close R5Rust is to the real game
 
-Measured by recording the same inputs in real R5Flowstate (Octane, 60 fps, holstered) and replaying them through
-R5Rust's movement code (`r5f-probe` + `probecmp`). Horizontal speed, R5Rust / real:
+Measured by recording the same inputs in real R5Flowstate (Octane, holstered, 87 scripted runs on real Firing Range
+geometry) and replaying each recorded usercmd, with its real frame time and view angles, through R5Rust's movement
+code (`r5f-probe` + `probecmp`). Target: within 2 u/s horizontal speed and 10 u position for the whole run.
 
-| Run | Result |
-|---|---|
-| Walk / sprint top speed | 299 / 299 |
-| Crouch walk | 92 / 92 |
-| Standing jump (vertical speed at 0.5 s) | 146 / 143 |
-| D lurch 150 ms after a jump | 256 / 263 |
-| S+D lurch | 174 / 168, then 184 / 180 |
-| S (back) lurch | 48 / 30, then 69 / 69 |
-| Forward RAS (LiTTle's reference timing) | 468, 491, 354, 327 / 470, 496, 363, 330 |
+**31-33 of 87 runs are within it** (23 before the S21 port). These match to the frame (0.0 u/s): walk, sprint tap,
+crouch walk, crouch stand/tap/jump, standing jump, sprint jump (+ duck, + stop), slide, slide jump, bhop, walking
+back/sideways, slopes up and down, 71 u drops, and the A, S and null lurches.
 
-Being re-verified as the S21 port lands: acceleration curves, slides on slopes, bhop chains, superglide, step-ups,
-mantles, mantle boost, wall climb and wall jump.
+Worst speed error / worst position error per run (u/s / u), before and after the port. A selection; the full table
+is in [implementation.md](implementation.md#against-r5flowstate-probe-round-2-2026-11-17).
+
+| Run | Before | After |
+|---|---|---|
+| crouch_walk | 13.9 / 0.8 | 0.0 / 0.1 |
+| crouch_stand | 62.6 / 38.0 | 0.0 / 0.1 |
+| slide | 9.4 / 5.9 | 0.0 / 0.1 |
+| slide_long | 6.7 / 6.2 | 0.4 / 0.6 |
+| slide_cooldown | 93.1 / 51.7 | 0.4 / 4.4 |
+| slide_jump_late | 10.2 / 14.8 | 0.4 / 3.1 |
+| walk_diag | 23.1 / 12.4 | 10.3 / 7.3 |
+| lurch_d_250 | 118.3 / 14.3 | 81.8 / 15.2 |
+| mantle_tall_release | 135.1 / 122.9 | 7.0 / 29.7 |
+| superglide_650 | 299.0 / 73.1 | 199.5 / 20.7 |
+| air_strafe_d | 127.4 / 73.8 | 141.6 / 75.5 |
+| climb | 189.9 / 36.5 | 185.7 / 41.6 |
+| jump_back | 163.8 / 62.5 | 163.8 / 62.5 |
+
+**What is left.** Most large errors happen where the player touches a static prop's sloped or bevelled surface: the
+real game collides with a slightly different shape than R5Rust's collision export (a ramp ~7 u higher in ours, a
+chamfer at a wall base that deflects our climb jump, the props the air-strafe runs reach). Apex stores more than one
+collision tree per prop, and an A/B test showed the game picks per prop: using every prop's physics tree instead
+fixes some runs (lurch_wd_150 136 -> 12 u, lurch_d_250 15 -> 0.7 u) and breaks others (lurch_d_50 14 -> 70 u), 33 vs
+31 runs overall. Finding the rule in the S21 client's static-prop trace is the next step. Not yet compared at all:
+ziplines, grapple, jump pads, abilities.
 
 ## Sources
 
